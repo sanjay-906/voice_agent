@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+websockets
+google-genai
+pydantic
+pydantic-settings
+python-multipart
+python-dotenv
+aiofiles
