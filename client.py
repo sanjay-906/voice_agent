@@ -42,7 +42,7 @@ logger = logging.getLogger("GeminiLiveClient")
 # Constants
 DEFAULT_SAMPLE_RATE = 24000  # Required by Gemini Live API
 DEFAULT_CHUNK_SIZE = 3200    # Bytes per audio chunk
-SILENCE_DURATION = 3.0       # Seconds of silence to send
+SILENCE_DURATION = 2.0       # Seconds of silence to send
 AUDIO_TIMEOUT = 30           # Seconds to wait for audio responses
 
 global audio_out, speaker
@@ -201,11 +201,11 @@ class MicAudioStream:
                 exception_on_overflow=False
             )
 
-            import struct
-            samples = struct.unpack("<" + "h" * (len(chunk) // 2), chunk)
-            peak = max(abs(s) for s in samples)
+            # import struct
+            # samples = struct.unpack("<" + "h" * (len(chunk) // 2), chunk)
+            # peak = max(abs(s) for s in samples)
 
-            logger.info(f"🎙 Mic peak: {peak}")  # use INFO so you see it
+            # logger.info(f"🎙 Mic peak: {peak}")  # use INFO so you see it
 
             return chunk
 

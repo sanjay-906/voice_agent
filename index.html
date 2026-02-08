@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gemini Live Chat</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    #chat {
+      border: 1px solid #ccc;
+      padding: 10px;
+      height: 300px;
+      overflow-y: auto;
+      margin-bottom: 10px;
+    }
+    .user { color: blue; }
+    .assistant { color: green; }
+    button {
+      margin-right: 5px;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Gemini Live UI</h2>
+
+<div id="chat"></div>
+
+<h3>Text Chat</h3>
+<input id="textInput" type="text" placeholder="Type a message..." />
+<button onclick="sendText()">Send</button>
+
+<hr />
+
+<h3>Voice Chat</h3>
+<button onclick="startVoice()">Start Conversation</button>
+<button onclick="endVoice()">End Conversation</button>
+
+<script>
+  const WS_URL = "ws://localhost:8000/ws"; 
+  let ws;
+  let audioContext;
+  let processor;
+  let source;
+  let stream;
+  
+  // Queue to play received audio chunks smoothly
+  let nextStartTime = 0;
+  let audioCtxOut = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+
+  function log(role, text) {
+    const div = document.createElement("div");
+    div.className = role;
+    div.innerText = `${role}: ${text}`;
+    document.getElementById("chat").appendChild(div);
+    document.getElementById("chat").scrollTop = document.getElementById("chat").scrollHeight;
+  }
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = "arraybuffer"; // Important for receiving audio
+
+    ws.onopen = () => console.log("WS connected");
+
+    ws.onmessage = async (event) => {
+      // 1. Handle Text (JSON)
+      if (typeof event.data === "string") {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "transcript") {
+          log(msg.role, msg.text);
+        } else if (msg.type === "handover") {
+          log("system", "Transferred to Human Agent");
+        }
+      } 
+      // 2. Handle Audio (Binary)
+      else if (event.data instanceof ArrayBuffer) {
+        playAudioChunk(event.data);
+      }
+    };
+
+    ws.onclose = () => console.log("WS closed");
+  }
+
+  function playAudioChunk(arrayBuffer) {
+    // Determine format (Gemini usually sends PCM 24kHz or 16kHz depending on config)
+    // The backend sends raw PCM. We need to create a buffer.
+    // NOTE: If using response_modalities=["AUDIO"], Gemini often sends encoded audio or PCM.
+    // The google-genai SDK 'response.data' is usually raw PCM 16bit 24kHz.
+    
+    const pcm16 = new Int16Array(arrayBuffer);
+    const float32 = new Float32Array(pcm16.length);
+    
+    for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / 32768;
+    }
+
+    const buffer = audioCtxOut.createBuffer(1, float32.length, 24000);
+    buffer.getChannelData(0).set(float32);
+
+    const source = audioCtxOut.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtxOut.destination);
+
+    const currentTime = audioCtxOut.currentTime;
+    if (nextStartTime < currentTime) {
+        nextStartTime = currentTime;
+    }
+    source.start(nextStartTime);
+    nextStartTime += buffer.duration;
+  }
+
+  connect();
+
+  /* --- TEXT & VOICE FUNCTIONS REMAIN THE SAME --- */
+  function sendText() {
+    const input = document.getElementById("textInput");
+    const text = input.value.trim();
+    if (!text) return;
+    ws.send(JSON.stringify({ content: text }));
+    // log("user", text); // Removed: let the server transcript log it to avoid duplicates
+    input.value = "";
+  }
+
+  async function startVoice() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Resume output context if suspended (browser autoplay policy)
+    if (audioCtxOut.state === 'suspended') await audioCtxOut.resume();
+
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    source = audioContext.createMediaStreamSource(stream);
+    processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      ws.send(floatTo16BitPCM(input));
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    console.log("Voice started");
+  }
+
+  function endVoice() {
+    if (processor) processor.disconnect();
+    if (source) source.disconnect();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (audioContext) audioContext.close();
+  }
+
+  function floatTo16BitPCM(float32Array) {
+    const buffer = new ArrayBuffer(float32Array.length * 2);
+    const view = new DataView(buffer);
+    let offset = 0;
+    for (let i = 0; i < float32Array.length; i++, offset += 2) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return buffer;
+  }
+</script>
+
+</body>
+</html>

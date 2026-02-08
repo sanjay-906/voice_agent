@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     SEND_SAMPLE_RATE: int = 16000
     RECEIVE_SAMPLE_RATE: int = 24000
 
-    MODEL: str = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-    SUMMARY_MODEL: str = "models/gemini-2.5-flash"
+    # MODEL: str = "models/gemini-2.5-flash-native-audio-preview-09-2025"
+    MODEL: str = "gemini-2.5-flash-native-audio-preview-12-2025"
 
     class Config:
         env_file: str = ".env"
