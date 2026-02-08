@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -160,6 +160,227 @@
     }
     return buffer;
   }
+</script>
+
+</body>
+</html> -->
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gemini Live Chat</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    #chat { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: auto; margin-bottom: 10px; }
+    .user { color: blue; text-align: right; }
+    .assistant { color: green; text-align: left; }
+    .system { color: gray; font-style: italic; }
+    button { margin-right: 5px; padding: 8px; }
+    input { padding: 8px; width: 60%; }
+  </style>
+</head>
+<body>
+
+<h2>Gemini Live UI (Fixed)</h2>
+<div id="chat"></div>
+
+<h3>Text Chat</h3>
+<input id="textInput" type="text" placeholder="Type a message..." />
+<button onclick="sendText()">Send</button>
+
+<hr />
+<h3>Voice Chat</h3>
+<button onclick="startVoice()">Start Conversation</button>
+<button onclick="endVoice()">End Conversation</button>
+
+<script>
+  const WS_URL = "ws://localhost:8000/ws"; 
+  let ws;
+  let audioContext;
+  let mediaStream;
+  let audioInput;
+  let processor;
+  let nextStartTime = 0;
+  
+  // Audio Context for PLAYING audio (Output)
+  // Gemini sends 24kHz audio usually, but 16k-24k range is common. 
+  // We use a standard context; we'll handle sample rate in playAudioChunk.
+  let audioCtxOut = new (window.AudioContext || window.webkitAudioContext)();
+
+  function log(role, text) {
+    const div = document.createElement("div");
+    div.className = role;
+    div.innerText = `${role}: ${text}`;
+    const chat = document.getElementById("chat");
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => log("system", "Connected to Server");
+    
+    ws.onmessage = async (event) => {
+      if (typeof event.data === "string") {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "transcript") {
+          log(msg.role, msg.text);
+        } else if (msg.type === "handover") {
+          log("system", "--- Handover to Human Agent ---");
+        } else if (msg.type === "error") {
+            log("system", "Error: " + msg.message);
+        }
+      } else if (event.data instanceof ArrayBuffer) {
+        // Received Audio from Gemini
+        playAudioChunk(event.data);
+      }
+    };
+
+    ws.onclose = () => log("system", "Disconnected");
+  }
+
+  function playAudioChunk(arrayBuffer) {
+    // Gemini sends raw PCM 16-bit linear.
+    // The sample rate defaults to 24000Hz for "Live" output usually, 
+    // or matches input (16000) depending on config.
+    // Let's assume 24000Hz based on standard Gemini Live behavior.
+    const playbackRate = 24000; 
+
+    const pcm16 = new Int16Array(arrayBuffer);
+    const float32 = new Float32Array(pcm16.length);
+    
+    // Convert PCM16 -> Float32
+    for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / 32768;
+    }
+
+    const buffer = audioCtxOut.createBuffer(1, float32.length, playbackRate);
+    buffer.getChannelData(0).set(float32);
+
+    const source = audioCtxOut.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtxOut.destination);
+
+    const currentTime = audioCtxOut.currentTime;
+    if (nextStartTime < currentTime) nextStartTime = currentTime;
+    source.start(nextStartTime);
+    nextStartTime += buffer.duration;
+  }
+
+  /* --- INPUT HANDLING --- */
+
+  function sendText() {
+    const input = document.getElementById("textInput");
+    const text = input.value.trim();
+    if (!text) return;
+    ws.send(JSON.stringify({ content: text }));
+    log("user", text);
+    input.value = "";
+  }
+
+  async function startVoice() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("WebSocket not connected. Refresh page.");
+        return;
+    }
+    
+    await audioCtxOut.resume();
+
+    // 1. Setup Audio Input
+    // Explicitly ask for 16000, but handle if browser refuses
+    const constraints = {
+        audio: {
+            sampleRate: 16000,
+            channelCount: 1,
+            echoCancellation: true, // CRITICAL for Live Mode
+            noiseSuppression: true,
+            autoGainControl: true
+        }
+    };
+
+    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    
+    // Create separate context for input processing
+    audioContext = new AudioContext({ sampleRate: 16000 }); 
+    
+    // NOTE: If browser ignores sampleRate:16000 in new AudioContext(), 
+    // we must handle resampling. 
+    console.log("Input Sample Rate:", audioContext.sampleRate);
+
+    audioInput = audioContext.createMediaStreamSource(mediaStream);
+    
+    // Buffer size 2048 or 4096 is good for 16k
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0);
+      
+      // If the browser forced 44.1k/48k, we need to downsample to 16k
+      // to match what the Python backend expects.
+      let finalData = inputData;
+      if (audioContext.sampleRate !== 16000) {
+         finalData = downsampleBuffer(inputData, audioContext.sampleRate, 16000);
+      }
+      
+      // Convert to 16-bit PCM and send
+      ws.send(floatTo16BitPCM(finalData));
+    };
+
+    audioInput.connect(processor);
+    processor.connect(audioContext.destination); // destination is mute needed for ScriptProcessor to run
+    log("system", "Voice started (Mic Active)");
+  }
+
+  function endVoice() {
+    if (processor) { processor.disconnect(); processor = null; }
+    if (audioInput) { audioInput.disconnect(); audioInput = null; }
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    if (audioContext) { audioContext.close(); audioContext = null; }
+    log("system", "Voice stopped");
+  }
+
+  // Simple Downsampler
+  function downsampleBuffer(buffer, sampleRate, outSampleRate) {
+    if (outSampleRate == sampleRate) {
+        return buffer;
+    }
+    if (outSampleRate > sampleRate) {
+        throw "downsampling rate show be smaller than original sample rate";
+    }
+    var sampleRateRatio = sampleRate / outSampleRate;
+    var newLength = Math.round(buffer.length / sampleRateRatio);
+    var result = new Float32Array(newLength);
+    var offsetResult = 0;
+    var offsetBuffer = 0;
+    while (offsetResult < result.length) {
+        var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+        var accum = 0, count = 0;
+        for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+            accum += buffer[i];
+            count++;
+        }
+        result[offsetResult] = accum / count;
+        offsetResult++;
+        offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function floatTo16BitPCM(float32Array) {
+    const buffer = new ArrayBuffer(float32Array.length * 2);
+    const view = new DataView(buffer);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); // Little endian
+    }
+    return buffer;
+  }
+  
+  connect();
 </script>
 
 </body>
